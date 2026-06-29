@@ -98,7 +98,7 @@ export default {
       return new Response(JSON.stringify(crawlResults), { headers: { "Content-Type": "application/json" } });
     }
 
-    // NEW ADMINISTRATIVE RESET ENDPOINT
+    // Administrative Reset Endpoint
     if (url.pathname === '/api/reset') {
       try {
         await env.car_db.prepare("DELETE FROM cars;").run();
@@ -230,67 +230,71 @@ export default {
         <script>
             let cachedCars = [];
             
-            // Hardcoded defaults + LocalStorage custom arrays configuration initialization
             const DEFAULT_SUGGESTIONS = [
                 "Japanese hybrid under 10 years",
                 "Toyota or Honda built after 2020",
                 "Nissan e-power car"
             ];
 
-            function getSuggestions() {
+            function getCustomSuggestions() {
                 const stored = localStorage.getItem('custom_car_prompts');
-                return stored ? JSON.parse(stored) : [...DEFAULT_SUGGESTIONS];
+                return stored ? JSON.parse(stored) : [];
             }
 
             function renderSuggestions() {
                 const tray = document.getElementById('suggestionTray');
                 tray.innerHTML = '';
-                const currentList = getSuggestions();
-
-                currentList.forEach((text) => {
-                    const isDefault = DEFAULT_SUGGESTIONS.includes(text);
-                    const wrapper = document.createElement('div');
-                    wrapper.className = "inline-flex items-center bg-slate-900 border border-slate-700/60 rounded-md text-slate-300 overflow-hidden text-[11px] font-medium shadow-sm hover:border-slate-600 transition";
-                    
-                    // Main prompt label button
-                    const labelBtn = document.createElement('button');
-                    labelBtn.className = "px-2.5 py-1 text-left cursor-pointer hover:text-white";
-                    labelBtn.innerText = text;
-                    labelBtn.onclick = () => setPrompt(text);
-                    wrapper.appendChild(labelBtn);
-
-                    // If it's a user suggestion, add a neat delete 'x' button element
-                    if (!isDefault) {
-                        const delBtn = document.createElement('button');
-                        delBtn.className = "px-1.5 py-1 bg-slate-950/40 text-slate-500 hover:text-rose-400 hover:bg-slate-950 border-l border-slate-800 transition cursor-pointer";
-                        delBtn.innerHTML = '<i class="fa-solid fa-xmark text-[9px]"></i>';
-                        delBtn.onclick = (e) => {
-                            e.stopPropagation();
-                            removeSuggestion(text);
-                        };
-                        wrapper.appendChild(delBtn);
-                    }
-
-                    tray.appendChild(wrapper);
+                
+                DEFAULT_SUGGESTIONS.forEach(text => {
+                    createTagElement(tray, text, false);
                 });
+
+                getCustomSuggestions().forEach(text => {
+                    createTagElement(tray, text, true);
+                });
+            }
+
+            function createTagElement(tray, text, canDelete) {
+                const wrapper = document.createElement('div');
+                wrapper.className = "inline-flex items-center bg-slate-900 border border-slate-700/60 rounded-md text-slate-300 overflow-hidden text-[11px] font-medium shadow-sm hover:border-slate-600 transition";
+                
+                const labelBtn = document.createElement('button');
+                labelBtn.className = "px-2.5 py-1 text-left cursor-pointer hover:text-white";
+                labelBtn.innerText = text;
+                labelBtn.onclick = () => setPrompt(text);
+                wrapper.appendChild(labelBtn);
+
+                if (canDelete) {
+                    const delBtn = document.createElement('button');
+                    delBtn.className = "px-1.5 py-1 bg-slate-950/40 text-slate-500 hover:text-rose-400 hover:bg-slate-950 border-l border-slate-800 transition cursor-pointer";
+                    delBtn.innerHTML = '<i class="fa-solid fa-xmark text-[9px]"></i>';
+                    delBtn.onclick = (e) => {
+                        e.stopPropagation();
+                        removeSuggestion(text);
+                    };
+                    wrapper.appendChild(delBtn);
+                }
+
+                tray.appendChild(wrapper);
             }
 
             function saveCurrentAsSuggestion() {
                 const query = document.getElementById('queryInput').value.trim();
                 if (!query) return alert('Type something into the input field first before saving.');
+                if (DEFAULT_SUGGESTIONS.includes(query)) return;
                 
-                const currentList = getSuggestions();
-                if (currentList.includes(query)) return; // Already exists
+                const customs = getCustomSuggestions();
+                if (customs.includes(query)) return;
 
-                currentList.push(query);
-                localStorage.setItem('custom_car_prompts', JSON.stringify(currentList));
+                customs.push(query);
+                localStorage.setItem('custom_car_prompts', JSON.stringify(customs));
                 renderSuggestions();
             }
 
             function removeSuggestion(text) {
-                let currentList = getSuggestions();
-                currentList = currentList.filter(item => item !== text);
-                localStorage.setItem('custom_car_prompts', JSON.stringify(currentList));
+                let customs = getCustomSuggestions();
+                customs = customs.filter(item => item !== text);
+                localStorage.setItem('custom_car_prompts', JSON.stringify(customs));
                 renderSuggestions();
             }
 
@@ -299,7 +303,6 @@ export default {
                 searchCars();
             }
 
-            // NEW: Administrative Drop Table Front-end Trigger Handler
             async function triggerReset() {
                 if (!confirm('Are you absolutely sure you want to clean up all DB records? This will clear the cached data completely.')) return;
                 
@@ -311,7 +314,7 @@ export default {
                     const res = await fetch('/api/reset');
                     const data = await res.json();
                     alert(data.message || 'Wiped successfully.');
-                    searchCars(); // Force render screen updates
+                    searchCars(); 
                 } catch(e) {
                     alert('Administrative reset route execution rejected.');
                 } finally {
@@ -407,7 +410,7 @@ export default {
                     card.innerHTML = \`
                         <div class="p-5">
                             <div class="flex flex-wrap gap-1.5 items-center justify-between mb-2">
-                                <div class="flex gap-1.5">\sol\${badgesHTML}</div>
+                                <div class="flex gap-1.5">\${badgesHTML}</div>
                                 <span class="text-[11px] font-bold bg-slate-950 text-amber-500 border border-slate-800 px-2 py-0.5 rounded-md">\${formattedOwners}</span>
                             </div>
                             <h3 class="text-lg font-bold text-white truncate mb-1">\${car.model}</h3>
