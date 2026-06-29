@@ -13,7 +13,7 @@ export default {
       }
 
       const stmt = env.car_db.prepare(
-        `INSERT OR REPLACE INTO cars (id, brand, model, year, price_hkd, is_hybrid, url, is_sold, mileage, engine_cc, previous_owners) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT OR REPLACE INTO cars (id, brand, model, year, price_hkd, original_price, is_hybrid, url, is_sold, mileage, engine_cc, previous_owners) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       );
 
       while (hasMorePages) {
@@ -48,13 +48,27 @@ export default {
           const isHybrid = textToSearch.includes('hybrid') || textToSearch.includes('混合動力') || textToSearch.includes('e-power');
           const isSoldStatus = car.isSold === true || v.isSold === true ? 1 : 0;
 
-          if (brandName !== "Unknown" && (parseInt(v.sellingPrice) || 0) > 0) {
+          // INTELLIGENT DISCOUNT PRICING ENGINE
+          const rawSellingPrice = parseInt(v.sellingPrice) || 0;
+          const rawDiscountedPrice = parseInt(v.discountedPrice) || 0;
+          
+          let finalPricePayable = rawSellingPrice;
+          let regularOriginalPrice = 0;
+
+          // If a discounted price exists and it's lower than regular price, activate discount state
+          if (rawDiscountedPrice > 0 && rawDiscountedPrice < rawSellingPrice) {
+            finalPricePayable = rawDiscountedPrice;
+            regularOriginalPrice = rawSellingPrice;
+          }
+
+          if (brandName !== "Unknown" && finalPricePayable > 0) {
             await stmt.bind(
               String(car.id || v.id),
               brandName,
               v.model || "Unknown",
               parseInt(v.year) || 0,
-              parseInt(v.sellingPrice) || 0,
+              finalPricePayable,
+              regularOriginalPrice,
               isHybrid ? 1 : 0,
               `https://www.dchucc.com/tc/car-info/${car.id || ''}`,
               isSoldStatus,
@@ -92,17 +106,15 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     
-    // Live Crawler Synchronization Endpoint
     if (url.pathname === '/api/crawl') {
       const crawlResults = await this.runCrawler(env);
       return new Response(JSON.stringify(crawlResults), { headers: { "Content-Type": "application/json" } });
     }
 
-    // Administrative Reset Endpoint
     if (url.pathname === '/api/reset') {
       try {
         await env.car_db.prepare("DELETE FROM cars;").run();
-        return new Response(JSON.stringify({ success: true, message: "Database wiped completely. All metrics reset to 0." }), {
+        return new Response(JSON.stringify({ success: true, message: "Database wiped completely." }), {
           headers: { "Content-Type": "application/json" }
         });
       } catch (e) {
@@ -110,7 +122,6 @@ export default {
       }
     }
 
-    // AI Query Search Pipeline
     if (url.pathname === '/api/search') {
       const userQuery = url.searchParams.get("query") || ""; 
       let filters = { brands: [], min_year: null, max_year: null, is_hybrid: null };
@@ -304,12 +315,10 @@ export default {
             }
 
             async function triggerReset() {
-                if (!confirm('Are you absolutely sure you want to clean up all DB records? This will clear the cached data completely.')) return;
-                
+                if (!confirm('Are you absolutely sure you want to clean up all DB records?')) return;
                 const btn = document.getElementById('resetBtn');
                 btn.disabled = true;
                 btn.innerHTML = '<i class="fa-solid fa-spinner animate-spin"></i> <span>Wiping...</span>';
-                
                 try {
                     const res = await fetch('/api/reset');
                     const data = await res.json();
@@ -399,6 +408,9 @@ export default {
                     if (car.is_hybrid) {
                         badgesHTML += \`<span class="bg-emerald-950/80 text-emerald-400 border border-emerald-900 text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-md flex items-center gap-1"><i class="fa-solid fa-leaf"></i> Hybrid</span>\`;
                     }
+                    if (car.original_price > 0) {
+                        badgesHTML += \`<span class="bg-amber-950/80 text-amber-400 border border-amber-900 text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-md flex items-center gap-1"><i class="fa-solid fa-tags"></i> 特價 SALE</span>\`;
+                    }
                     if (car.is_sold) {
                         badgesHTML += \`<span class="bg-rose-950 text-rose-400 border border-rose-900 text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-md flex items-center gap-1"><i class="fa-solid fa-handshake"></i> 已售 SOLD</span>\`;
                     }
@@ -407,10 +419,31 @@ export default {
                     const formattedMileage = car.mileage > 0 ? car.mileage.toLocaleString() + ' km' : 'N/A';
                     const formattedOwners = car.previous_owners + '手';
 
+                    // DYNAMIC PRICE LAYOUT RENDERING ENGINE
+                    let priceDisplayHTML = '';
+                    if (car.original_price > 0) {
+                        priceDisplayHTML = \`
+                            <div class="flex flex-col mt-3">
+                                <span class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">特價 Special Price</span>
+                                <div class="flex items-baseline space-x-2">
+                                    <span class="text-2xl font-black text-orange-400 font-mono">HK$ \${car.price_hkd.toLocaleString()}</span>
+                                    <span class="text-xs line-through text-slate-500 font-mono">HK$ \${car.original_price.toLocaleString()}</span>
+                                </div>
+                            </div>
+                        \`;
+                    } else {
+                        priceDisplayHTML = \`
+                            <div class="flex flex-col mt-3">
+                                <span class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">售價 Price</span>
+                                <span class="text-2xl font-black text-amber-400 font-mono">HK$ \${car.price_hkd.toLocaleString()}</span>
+                            </div>
+                        \`;
+                    }
+
                     card.innerHTML = \`
                         <div class="p-5">
                             <div class="flex flex-wrap gap-1.5 items-center justify-between mb-2">
-                                <div class="flex gap-1.5">\${badgesHTML}</div>
+                                <div class="flex flex-wrap gap-1.5">\${badgesHTML}</div>
                                 <span class="text-[11px] font-bold bg-slate-950 text-amber-500 border border-slate-800 px-2 py-0.5 rounded-md">\${formattedOwners}</span>
                             </div>
                             <h3 class="text-lg font-bold text-white truncate mb-1">\${car.model}</h3>
@@ -430,9 +463,7 @@ export default {
                                 </div>
                             </div>
 
-                            <div class="text-2xl font-black text-amber-400 font-mono mt-3">
-                                HK$ \${car.price_hkd.toLocaleString()}
-                            </div>
+                            \${priceDisplayHTML}
                         </div>
                         <div class="bg-slate-800/50 px-5 py-3 border-t border-slate-700/40">
                             <a href="\${car.url}" target="_blank" class="text-xs font-bold text-sky-400 hover:text-sky-300 flex items-center justify-between group">

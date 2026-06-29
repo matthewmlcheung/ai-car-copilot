@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS cars (
     model TEXT,
     year INTEGER,
     price_hkd INTEGER,
+    original_price INTEGER DEFAULT 0,
     is_hybrid INTEGER,
     url TEXT,
     is_sold INTEGER DEFAULT 0,
