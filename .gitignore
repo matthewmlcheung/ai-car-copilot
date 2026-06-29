@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+.jsonc-cache
+
+# Local wrangler development files
+.wrangler/
+.dev.vars
+
+# Log files
+logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db

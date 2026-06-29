@@ -1,0 +1,18 @@
+{
+  "name": "car-crawler",
+  "main": "src/index.js",
+  "compatibility_date": "2026-06-29",
+  "ai": {
+    "binding": "AI"
+  },
+  "d1_databases": [
+    {
+      "binding": "car_db",
+      "database_name": "car-db",
+      "database_id": "b15179af-1f3c-458d-8135-efdab0fe807d"
+    }
+  ],
+  "triggers": {
+    "crons": ["0 * * * *"]
+  }
+}
