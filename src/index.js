@@ -48,14 +48,12 @@ export default {
           const isHybrid = textToSearch.includes('hybrid') || textToSearch.includes('混合動力') || textToSearch.includes('e-power');
           const isSoldStatus = car.isSold === true || v.isSold === true ? 1 : 0;
 
-          // INTELLIGENT DISCOUNT PRICING ENGINE
           const rawSellingPrice = parseInt(v.sellingPrice) || 0;
           const rawDiscountedPrice = parseInt(v.discountedPrice) || 0;
           
           let finalPricePayable = rawSellingPrice;
           let regularOriginalPrice = 0;
 
-          // If a discounted price exists and it's lower than regular price, activate discount state
           if (rawDiscountedPrice > 0 && rawDiscountedPrice < rawSellingPrice) {
             finalPricePayable = rawDiscountedPrice;
             regularOriginalPrice = rawSellingPrice;
@@ -124,10 +122,16 @@ export default {
 
     if (url.pathname === '/api/search') {
       const userQuery = url.searchParams.get("query") || ""; 
-      let filters = { brands: [], min_year: null, max_year: null, is_hybrid: null };
+      const normalizedQuery = userQuery.toLowerCase().trim();
+      
+      // Enforce default base structure
+      let filters = { brands: [], min_year: null, max_year: null, is_hybrid: null, on_sale: null };
 
-      if (userQuery.trim() !== "") {
-        const systemPrompt = `You are a car database assistant. Convert the user's request into a strict JSON object with these exact keys: 'brands' (array of strings, e.g., ["Honda", "Toyota"]), 'min_year' (integer), 'max_year' (integer), 'is_hybrid' (boolean or null). The current year is 2026. Only output valid JSON, nothing else. Do not use markdown blocks.`;
+      if (normalizedQuery !== "") {
+        const systemPrompt = `You are a car database assistant. Convert the user's request into a strict JSON object with these exact keys: 'brands' (array of strings, e.g., ["Honda", "Toyota"]), 'min_year' (integer), 'max_year' (integer), 'is_hybrid' (boolean or null), 'on_sale' (boolean or null). The current year is 2026.
+        - Set 'on_sale' to true if the request contains keywords like: sale, discount, promo, special price, bargain, 特價, 減價.
+        - Set 'is_hybrid' to true if the request contains keywords like: hybrid, e-power, e:hev, 混合動力.
+        Only output valid JSON, nothing else. Do not wrap output in markdown blocks.`;
         
         const aiResponse = await env.AI.run('@cf/qwen/qwen3-30b-a3b-fp8', {
           messages: [
@@ -139,19 +143,34 @@ export default {
         try {
           let rawText = typeof aiResponse.response === 'string' ? aiResponse.response : JSON.stringify(aiResponse.response);
           const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-          if (jsonMatch) filters = JSON.parse(jsonMatch[0]);
+          if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[0]);
+            // Merge matching values back to retain structural keys integrity
+            filters = { ...filters, ...parsed };
+          }
         } catch (error) {
-          return new Response(JSON.stringify({ error: "AI interpretation failure." }), { status: 500 });
+          // Quiet fallback to programmatic rules if parsing exceptions hit
         }
       }
 
+      // 🛑 REINFORCED CODE SAFEGUARD (Guarantees matching metrics even if AI misses them)
+      if (normalizedQuery.includes('sale') || normalizedQuery.includes('discount') || normalizedQuery.includes('promo') || normalizedQuery.includes('特價') || normalizedQuery.includes('減價')) {
+        filters.on_sale = true;
+      }
+      if (normalizedQuery.includes('hybrid') || normalizedQuery.includes('e-power') || normalizedQuery.includes('e:hev') || normalizedQuery.includes('混合動力')) {
+        filters.is_hybrid = true;
+      }
+
+      // Build Dynamic SQL Query Dataset
       let sql = "SELECT * FROM cars WHERE 1=1";
       const params = [];
 
       if (filters.min_year) { sql += ` AND year >= ?`; params.push(filters.min_year); }
       if (filters.max_year) { sql += ` AND year <= ?`; params.push(filters.max_year); }
       if (filters.is_hybrid === true) { sql += ` AND is_hybrid = ?`; params.push(1); }
-      if (filters.brands && filters.brands.length > 0) {
+      if (filters.on_sale === true) { sql += ` AND original_price > 0`; }
+      
+      if (filters.brands && Array.isArray(filters.brands) && filters.brands.length > 0) {
         const placeholders = filters.brands.map(() => '?').join(',');
         sql += ` AND brand IN (${placeholders})`;
         params.push(...filters.brands);
@@ -419,7 +438,6 @@ export default {
                     const formattedMileage = car.mileage > 0 ? car.mileage.toLocaleString() + ' km' : 'N/A';
                     const formattedOwners = car.previous_owners + '手';
 
-                    // DYNAMIC PRICE LAYOUT RENDERING ENGINE
                     let priceDisplayHTML = '';
                     if (car.original_price > 0) {
                         priceDisplayHTML = \`
