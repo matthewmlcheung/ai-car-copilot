@@ -1,6 +1,7 @@
 DROP TABLE IF EXISTS cars;
 CREATE TABLE IF NOT EXISTS cars (
     id TEXT PRIMARY KEY,
+    source TEXT DEFAULT 'DCH UCC',
     brand TEXT,
     model TEXT,
     year INTEGER,

@@ -1,876 +1,616 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dragon Warrior Quest - By Colette</title>
-    <style>
-        *, *::before, *::after { box-sizing: border-box; }
+export default {
+  // 1. MULTI-DEALER CRAWLER ENGINE
+  async runCrawler(env) {
+    if (!env.car_db) {
+      return { success: false, message: "Production binding error: 'car_db' is missing." };
+    }
 
-        body {
-            font-family: 'Trebuchet MS', sans-serif;
-            background: radial-gradient(circle at center, #2b2b2b, #111);
-            color: #ecf0f1;
-            text-align: center;
-            margin: 0;
-            padding: 10px;
-            overflow-x: hidden;
-            position: relative;
+    const stmt = env.car_db.prepare(
+      `INSERT OR REPLACE INTO cars (id, source, brand, model, year, price_hkd, original_price, is_hybrid, url, is_sold, mileage, engine_cc, previous_owners) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    );
+
+    let dchSaved = 0;
+    let imSaved = 0;
+
+    // --- SOURCE A: DCH UCC API CRAWLER ---
+    try {
+      let offset = 0;
+      const limit = 100;
+      let hasMorePages = true;
+
+      while (hasMorePages) {
+        const dchUrl = `https://www.dchucc.com/admin/api/car/available?offset=${offset}&limit=${limit}&order_by=default&sort=desc`;
+        const response = await fetch(dchUrl, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+            'Accept': 'application/json',
+            'X-Api-Key': 'TwTVFEi7kGyLCp7GVCa8qEuLzEwiuJXd'
+          }
+        });
+
+        const apiData = await response.json();
+        const rawCars = apiData.data || apiData.items || apiData.results || apiData;
+
+        if (!Array.isArray(rawCars) || rawCars.length === 0) {
+          hasMorePages = false;
+          break;
         }
 
-        /* Centered Language Selector */
-        .lang-container {
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            margin: 15px 0 5px 0;
-            z-index: 100;
-            width: 100%;
-        }
-        .lang-container select {
-            background: #222;
-            color: #f1c40f;
-            border: 2px solid #555;
-            padding: 8px 16px;
-            border-radius: 8px;
-            font-size: 16px;
-            font-weight: bold;
-            cursor: pointer;
-            transition: all 0.2s;
-        }
-        .lang-container select:hover {
-            border-color: #f1c40f;
-            background: #333;
-        }
-        
-        h1 { color: #f1c40f; text-transform: uppercase; letter-spacing: 2px; text-shadow: 2px 2px 5px #000; margin-bottom: 5px; font-size: clamp(20px, 5vw, 32px); }
-        h3 { margin-top: 0; color: #bdc3c7; font-style: italic; font-size: clamp(14px, 3vw, 18px); margin-bottom: 15px; }
-        
-        #setup-screen, #game-screen {
-            background: linear-gradient(135deg, #3a3f44, #272b30);
-            width: 100%; max-width: 700px; margin: 0 auto; padding: 15px;
-            border-radius: 12px; border: 2px solid #555; box-shadow: 0 10px 20px rgba(0,0,0,0.8);
-        }
-        #game-screen { display: none; }
-        
-        /* Expandable Rules Box */
-        details.rules-box {
-            background: rgba(0, 0, 0, 0.4);
-            border: 1px solid #f1c40f;
-            border-radius: 8px;
-            margin-bottom: 20px;
-            text-align: left;
-            font-size: clamp(12px, 3vw, 15px);
-            color: #ecf0f1;
-            overflow: hidden;
-        }
-        details.rules-box summary {
-            cursor: pointer;
-            font-weight: bold;
-            color: #f1c40f;
-            text-align: center;
-            font-size: 1.2em;
-            padding: 12px;
-            list-style: none;
-            background: rgba(255, 255, 255, 0.05);
-            transition: background 0.2s;
-        }
-        details.rules-box summary::-webkit-details-marker { display: none; }
-        details.rules-box summary:hover { background: rgba(255, 255, 255, 0.1); }
-        details.rules-box summary::before { content: '▶ '; display: inline-block; transition: transform 0.2s; font-size: 0.8em; }
-        details.rules-box[open] summary::before { transform: rotate(90deg); }
-        
-        .rules-content { padding: 0 15px 15px 15px; }
-        .rules-content ul { margin: 0; padding-left: 20px; line-height: 1.6; }
-        .rules-content li { margin-bottom: 8px; }
+        for (const car of rawCars) {
+          const v = car.vehicle || {};
+          let brandName = v.make ? v.make.trim() : "Unknown";
+          if (brandName !== "Unknown") {
+            brandName = brandName.charAt(0).toUpperCase() + brandName.slice(1).toLowerCase();
+          }
 
-        /* Highlighted Keywords */
-        .hl {
-            color: #e74c3c;
-            font-weight: bold;
-            text-shadow: 1px 1px 2px #000;
-            background: rgba(255, 255, 255, 0.1);
-            padding: 2px 5px;
-            border-radius: 4px;
-            border-bottom: 1px solid #e74c3c;
+          const textToSearch = `${v.engineType || ''} ${car.description || ''} ${car.descriptionEn || ''} ${car.equipments || ''}`.toLowerCase();
+          const isHybrid = textToSearch.includes('hybrid') || textToSearch.includes('混合動力') || textToSearch.includes('e-power');
+          const isSoldStatus = car.isSold === true || v.isSold === true ? 1 : 0;
+
+          const rawSellingPrice = parseInt(v.sellingPrice) || 0;
+          const rawDiscountedPrice = parseInt(v.discountedPrice) || 0;
+          let finalPricePayable = rawSellingPrice;
+          let regularOriginalPrice = 0;
+
+          if (rawDiscountedPrice > 0 && rawDiscountedPrice < rawSellingPrice) {
+            finalPricePayable = rawDiscountedPrice;
+            regularOriginalPrice = rawSellingPrice;
+          }
+
+          if (brandName !== "Unknown" && finalPricePayable > 0) {
+            await stmt.bind(
+              `DCH_${car.id || v.id}`,
+              'DCH UCC',
+              brandName,
+              v.model || "Unknown",
+              parseInt(v.year) || 0,
+              finalPricePayable,
+              regularOriginalPrice,
+              isHybrid ? 1 : 0,
+              `https://www.dchucc.com/tc/car-info/${car.id || ''}`,
+              isSoldStatus,
+              parseInt(v.mileage) || 0,
+              parseInt(v.cylinderCapacity) || 0,
+              parseInt(v.previousOwners) || 0
+            ).run();
+            dchSaved++;
+          }
         }
 
-        input, select, button { padding: 10px; margin: 5px; border-radius: 6px; border: 1px solid #222; font-size: clamp(14px, 3vw, 16px); font-weight: bold; width: 100%; }
-        
-        .player-setup-box { background: #222; padding: 10px; margin-bottom: 10px; border-radius: 8px; border: 1px solid #444; }
-        .player-row { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 5px; }
-        .skill-desc { font-size: clamp(12px, 2.5vw, 14px); color: #f1c40f; font-style: italic; margin-top: 5px; display: block; }
-        
-        .ai-btn { background: linear-gradient(135deg, #0984e3, #6c5ce7); color: white; border: 1px solid #a29bfe; box-shadow: 0 0 8px rgba(108, 92, 231, 0.5); }
-        .ai-btn:hover { background: linear-gradient(135deg, #6c5ce7, #0984e3); box-shadow: 0 0 12px rgba(108, 92, 231, 0.8); }
+        if (rawCars.length < limit) {
+          hasMorePages = false;
+        } else {
+          offset += limit;
+        }
+      }
+    } catch (e) {
+      console.error("DCH UCC Scraper error:", e.message);
+    }
 
-        button { background: linear-gradient(to bottom, #e74c3c, #c0392b); color: white; cursor: pointer; text-shadow: 1px 1px 2px black; box-shadow: 0 4px 6px rgba(0,0,0,0.5); transition: all 0.2s; padding: 12px 24px; }
-        button:hover { transform: translateY(2px); box-shadow: 0 2px 3px rgba(0,0,0,0.5); }
-        button:disabled { opacity: 0.6; cursor: not-allowed; }
-        
-        #log { height: 120px; overflow-y: auto; background: #000; color: #2ecc71; padding: 10px; border-radius: 5px; text-align: left; font-family: monospace; font-size: clamp(12px, 2.5vw, 14px); margin: 10px 0 15px 0; border: 1px solid #555; }
+    // --- SOURCE B: IM USED CAR (INCHCAPE) HTML DATA-ATTRIBUTE PARSER ---
+    try {
+      const imUrl = `https://www.imusedcar.com.hk/en/used-cars/?pageSize=32`;
+      const imResponse = await fetch(imUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+        }
+      });
 
-        #board { display: grid; grid-template-columns: repeat(10, 1fr); gap: 2px; margin: 15px 0 0 0; padding: 4px; background: #1a1a1a; border: 3px solid #f1c40f; border-radius: 8px; box-shadow: inset 0 0 10px black; width: 100%; }
-        .tile { background: linear-gradient(135deg, #7f8c8d, #636e72); aspect-ratio: 1; display: flex; align-items: center; justify-content: center; font-size: clamp(10px, 2.5vw, 14px); font-weight: bold; position: relative; color: #fff; border-radius: 3px; border: 1px solid #444; }
-        .dest-label { position: absolute; bottom: 2px; left: 50%; transform: translateX(-50%); font-size: clamp(7px, 2vw, 11px); background: rgba(0,0,0,0.7); color: #fff; padding: 1px 4px; border-radius: 4px; z-index: 5; white-space: nowrap; }
+      if (imResponse.ok) {
+        const htmlText = await imResponse.text();
 
-        .tile.portal { background: linear-gradient(135deg, #2980b9, #27ae60); border-color: #2ecc71; animation: pulse-portal 2s infinite; }
-        .tile.portal::after { content: '🌀'; position: absolute; font-size: clamp(14px, 3vw, 24px); opacity: 0.4; z-index: 1; }
-        .tile.trap { background: linear-gradient(135deg, #c0392b, #d35400); border-color: #e74c3c; animation: pulse-trap 2s infinite; }
-        .tile.trap::after { content: '🔥'; position: absolute; font-size: clamp(14px, 3vw, 24px); opacity: 0.4; z-index: 1; }
+        // Split HTML precisely on the vehicle container bounds identified from their source code
+        const carBlocks = htmlText.split(/<div(?=[^>]*data-vehicle-make=)/i);
+        
+        for (let i = 1; i < carBlocks.length; i++) {
+          const block = carBlocks[i];
+          
+          // Helper function to read embedded HTML attributes securely
+          const getAttr = (attr) => {
+            const match = block.match(new RegExp(`data-vehicle-${attr}=["']([^"']+)["']`, 'i'));
+            return match ? match[1] : null;
+          };
 
-        @keyframes pulse-portal { 0% { box-shadow: 0 0 3px #2ecc71; } 50% { box-shadow: 0 0 15px #2ecc71, inset 0 0 8px rgba(255,255,255,0.5); } 100% { box-shadow: 0 0 3px #2ecc71; } }
-        @keyframes pulse-trap { 0% { box-shadow: 0 0 3px #e74c3c; } 50% { box-shadow: 0 0 15px #e74c3c, inset 0 0 8px rgba(0,0,0,0.8); } 100% { box-shadow: 0 0 3px #e74c3c; } }
-        
-        .tile.start { background: #34495e; color: #3498db; }
-        .tile.end { background: linear-gradient(45deg, #f1c40f, #e67e22); font-size: clamp(16px, 4vw, 24px); box-shadow: 0 0 10px #f1c40f; }
-        
-        .player-token { position: absolute; font-size: clamp(14px, 3.5vw, 22px); line-height: 1; text-shadow: 2px 2px 4px rgba(0,0,0,0.8); transition: all 0.4s ease-in-out; z-index: 10; }
-        
-        .stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 10px; background: #111; padding: 10px; border-radius: 8px; }
-        @media (max-width: 500px) { .stats { grid-template-columns: 1fr; } }
+          let brandName = getAttr('make') || "Unknown";
+          if (brandName.toLowerCase() === "mercedes") brandName = "Mercedes Benz";
+          brandName = brandName.charAt(0).toUpperCase() + brandName.slice(1);
+          
+          let modelName = getAttr('model') || "Unknown";
+          const year = parseInt(getAttr('model-year')) || 0;
+          const mileage = parseInt(getAttr('odometer')) || 0;
+          const engineCc = parseInt(getAttr('engine-size')) || 0;
+          
+          // Pricing extraction via exact attributes
+          const specialPriceRaw = getAttr('special');
+          const normalPriceRaw = getAttr('price');
+          
+          let specialPrice = specialPriceRaw ? parseInt(parseFloat(specialPriceRaw)) : 0;
+          let normalPrice = normalPriceRaw ? parseInt(parseFloat(normalPriceRaw)) : 0;
+          
+          let finalPrice = specialPrice > 0 ? specialPrice : normalPrice;
+          let origPrice = specialPrice > 0 && normalPrice > specialPrice ? normalPrice : 0;
 
-        .player-stat { padding: 10px; border-radius: 5px; background: #222; font-size: clamp(12px, 2.5vw, 14px); text-align: left; }
-        .stat-header { display: flex; justify-content: space-between; font-weight: bold; font-size: 1.1em; }
-        .stat-ability { color: #bdc3c7; font-size: 0.85em; font-style: italic; margin-top: 4px; display: block; border-top: 1px dashed #444; padding-top: 4px;}
-        
-        /* Updated Setup Actions Layout */
-        .setup-actions { display: flex; flex-direction: column; align-items: center; gap: 5px; margin-top: 15px; }
-        .setup-actions-top { display: flex; justify-content: center; gap: 10px; width: 100%; }
-    </style>
-</head>
-<body>
+          // --- OMNI-SEARCH FIX ---
+          // Scan the entire block for any instance of IML followed by digits (e.g., IML4736)
+          const idMatch = block.match(/IML\d{3,6}/i);
+          const refId = idMatch ? idMatch[0].toUpperCase() : `IML_${Math.random().toString(36).substring(2, 8)}`;
+          
+          // Build the guaranteed URL
+          const carUrl = `https://www.imusedcar.com.hk/en/used-cars/${refId}`;
 
-    <div class="lang-container">
-        <select id="lang-select" onchange="changeLanguage()">
-            <option value="zh">繁體中文</option>
-            <option value="en">English</option>
-            <option value="ja">日本語</option>
-            <option value="es">Español</option>
-        </select>
-    </div>
+          // Metadata fallback mapping
+          const textToSearch = block.replace(/<[^>]+>/g, ' ').toLowerCase();
+          const isHybrid = textToSearch.includes('hybrid') || textToSearch.includes('hv') || textToSearch.includes('e power') || textToSearch.includes('混能') ? 1 : 0;
+          const isSold = textToSearch.includes('sold') || textToSearch.includes('已售') ? 1 : 0;
+          
+          const ownerMatch = textToSearch.match(/(\d+)\s*(?:previous owner|前任車主)/i);
+          const owners = ownerMatch ? parseInt(ownerMatch[1]) : 0;
 
-    <h1 data-i18n="title">龍戰士任務 🐉</h1>
-    <h3 data-i18n="designer">遊戲設計：Colette</h3>
+          // Commit to Database
+          if (year > 0 && finalPrice > 0 && brandName !== "Unknown") {
+            await stmt.bind(
+              `IM_${refId}`,
+              'IM Used Car',
+              brandName,
+              modelName,
+              year,
+              finalPrice,
+              origPrice,
+              isHybrid,
+              carUrl, 
+              isSold,
+              mileage,
+              engineCc,
+              owners
+            ).run();
+            imSaved++;
+          }
+        }
+      }
+    } catch (e) {
+      console.error("IM Used Car Scraper error:", e.message);
+    }
 
-    <div id="setup-screen">
-        
-        <details class="rules-box" open>
-            <summary data-i18n="rulesTitle">📜 任務規則</summary>
-            <div class="rules-content">
-                <ul>
-                    <li data-i18n="ruleGoal"><strong>目標：</strong>準確到達 <span class='hl'>100號格子</span> 擊敗巨龍！超出則會後退。</li>
-                    <li data-i18n="rulePortals"><strong>傳送門與陷阱：</strong><span class='hl'>魔法傳送門 🌀</span> 讓你前進。<span class='hl'>巨龍陷阱 🔥</span> 讓你後退。</li>
-                    <li data-i18n="ruleShield"><strong>寶石護盾：</strong>自動消耗 <span class='hl'>💎 寶石</span>（花費取決於職業）摧毀陷阱，保你安全！</li>
-                    <li data-i18n="ruleMilestone"><strong>里程碑：</strong>經過 <span class='hl'>25, 50, 75</span> 號格子會獲得裝滿寶石的 <span class='hl'>寶箱</span>。</li>
-                    <li data-i18n="ruleClasses"><strong>英雄職業：</strong>每個英雄都有 <span class='hl'>獨特技能</span>。選擇你最喜歡的，或隨機分配！</li>
-                </ul>
-            </div>
-        </details>
+    return { 
+      success: true, 
+      message: `Multi-Dealer Sync complete! Synchronized ${dchSaved} vehicles from DCH UCC and ${imSaved} vehicles from IM Used Car.` 
+    };
+  },
 
-        <h2 data-i18n="prepBattle">⚔️ 準備戰鬥 ⚔️</h2>
-        <select id="player-count" onchange="updatePlayerInputs()" style="max-width: 150px;">
-            <option value="1">1 Player</option>
-            <option value="2">2 Players</option>
-            <option value="3">3 Players</option>
-            <option value="4">4 Players</option>
-        </select>
-        
-        <div id="player-inputs"></div>
-        
-        <div class="setup-actions">
-            <div class="setup-actions-top">
-                <button onclick="randomizeHeroes()" style="flex: 1; max-width: 200px;" data-i18n="btnRandom">🎲 隨機分配</button>
-                <button onclick="startGame()" style="flex: 1; max-width: 200px;" data-i18n="btnStart">開始任務</button>
-            </div>
-            <button id="ai-names-btn" onclick="generateAllAINames()" class="ai-btn" style="max-width: 410px; width: 100%;" data-i18n="btnAINames">✨ AI 自動命名所有玩家</button>
-        </div>
-    </div>
+  async scheduled(event, env, ctx) {
+    await this.runCrawler(env);
+  },
 
-    <div id="game-screen">
-        <div class="stats" id="stats-container"></div>
-        
-        <div class="game-controls">
-            <h2 id="turn-indicator" style="font-size: clamp(16px, 4vw, 24px); margin: 0; text-align: left; flex: 1;"></h2>
-            <button onclick="resetGame()" style="background: linear-gradient(to bottom, #7f8c8d, #636e72); padding: 8px 12px; font-size: clamp(12px, 3vw, 14px); width: auto;" data-i18n="btnMenu">⬅️ 菜單</button>
-        </div>
-        
-        <button id="roll-btn" onclick="takeTurn()" style="max-width: 250px;" data-i18n="btnRoll">擲骰子 🎲</button>
-        <p id="dice-result" style="font-weight: bold; font-size: clamp(14px, 3vw, 18px); color: #f1c40f; margin: 10px 0; min-height: 22px;"></p>
-        
-        <div id="log"></div>
-        <div id="board"></div>
-    </div>
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    
+    if (url.pathname === '/api/crawl') {
+      const crawlResults = await this.runCrawler(env);
+      return new Response(JSON.stringify(crawlResults), { headers: { "Content-Type": "application/json" } });
+    }
 
-    <script>
-        // ==========================================
-        // ⚠️ AI CONFIGURATION (BATCH GENERATION)
-        // ==========================================
-        async function generateAllAINames() {
-            const count = parseInt(document.getElementById('player-count').value);
-            const aiBtn = document.getElementById('ai-names-btn');
-            const originalBtnText = aiBtn.innerHTML;
-            
-            const originalNames = [];
-            const classNames = [];
-            
-            // Lock inputs and gather classes
-            for (let i = 1; i <= count; i++) {
-                const inputField = document.getElementById(`p${i}-name`);
-                const selectedIcon = document.getElementById(`p${i}-icon`).value;
-                const heroClass = i18n[currentLang].classes[selectedIcon].name;
+    if (url.pathname === '/api/reset') {
+      try {
+        await env.car_db.prepare("DELETE FROM cars;").run();
+        return new Response(JSON.stringify({ success: true, message: "Database wiped completely." }), {
+          headers: { "Content-Type": "application/json" }
+        });
+      } catch (e) {
+        return new Response(JSON.stringify({ success: false, error: e.message }), { status: 500, headers: { "Content-Type": "application/json" } });
+      }
+    }
+
+    if (url.pathname === '/api/search') {
+      const userQuery = url.searchParams.get("query") || ""; 
+      const normalizedQuery = userQuery.toLowerCase().trim();
+      
+      let filters = { brands: [], min_year: null, max_year: null, is_hybrid: null, on_sale: null, sources: [] };
+
+      if (normalizedQuery !== "") {
+        const systemPrompt = `You are a car database assistant. Convert the user's request into a strict JSON object with exact keys: 'brands' (array), 'min_year' (int), 'max_year' (int), 'is_hybrid' (bool/null), 'on_sale' (bool/null), 'sources' (array of strings: ["DCH UCC"], ["IM Used Car"], or []). Current year: 2026.
+        - Set 'sources' to ["IM Used Car"] if user mentions IM, Inchcape, or 英之傑.
+        - Set 'sources' to ["DCH UCC"] if user mentions DCH, 大昌行.
+        - Set 'on_sale' to true if keywords like sale, discount, promo, special price, 特價, 減價 exist.
+        - Set 'is_hybrid' to true if keywords like hybrid, e-power, e:hev, 混合動力 exist.
+        Only output valid JSON without markdown.`;
+        
+        const aiResponse = await env.AI.run('@cf/qwen/qwen3-30b-a3b-fp8', {
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userQuery }
+          ]
+        });
+
+        try {
+          let rawText = typeof aiResponse.response === 'string' ? aiResponse.response : JSON.stringify(aiResponse.response);
+          const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            filters = { ...filters, ...JSON.parse(jsonMatch[0]) };
+          }
+        } catch (error) {}
+      }
+
+      if (normalizedQuery.includes('im') || normalizedQuery.includes('inchcape') || normalizedQuery.includes('英之傑')) {
+        filters.sources = ["IM Used Car"];
+      } else if (normalizedQuery.includes('dch') || normalizedQuery.includes('大昌行')) {
+        filters.sources = ["DCH UCC"];
+      }
+      if (normalizedQuery.includes('sale') || normalizedQuery.includes('discount') || normalizedQuery.includes('promo') || normalizedQuery.includes('特價')) {
+        filters.on_sale = true;
+      }
+      if (normalizedQuery.includes('hybrid') || normalizedQuery.includes('e-power') || normalizedQuery.includes('e:hev') || normalizedQuery.includes('混合動力')) {
+        filters.is_hybrid = true;
+      }
+
+      let sql = "SELECT * FROM cars WHERE 1=1";
+      const params = [];
+
+      if (filters.min_year) { sql += ` AND year >= ?`; params.push(filters.min_year); }
+      if (filters.max_year) { sql += ` AND year <= ?`; params.push(filters.max_year); }
+      if (filters.is_hybrid === true) { sql += ` AND is_hybrid = ?`; params.push(1); }
+      if (filters.on_sale === true) { sql += ` AND original_price > 0`; }
+      
+      if (filters.sources && Array.isArray(filters.sources) && filters.sources.length > 0) {
+        const placeholders = filters.sources.map(() => '?').join(',');
+        sql += ` AND source IN (${placeholders})`;
+        params.push(...filters.sources);
+      }
+
+      if (filters.brands && Array.isArray(filters.brands) && filters.brands.length > 0) {
+        const placeholders = filters.brands.map(() => '?').join(',');
+        sql += ` AND brand IN (${placeholders})`;
+        params.push(...filters.brands);
+      }
+      
+      const { results } = await env.car_db.prepare(sql).bind(...params).all();
+      return new Response(JSON.stringify({ success: true, ai_filters: filters, results: results }), { 
+        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } 
+      });
+    }
+
+    const htmlUI = `
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>AI Intelligent Car Copilot</title>
+        <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    </head>
+    <body class="bg-slate-900 text-slate-100 font-sans min-h-screen">
+        <div class="max-w-6xl mx-auto px-4 py-8">
+            <header class="flex flex-col sm:flex-row justify-between items-center gap-4 mb-10 border-b border-slate-800 pb-5">
+                <div class="flex items-center space-x-3">
+                    <i class="fa-solid fa-car-side text-sky-400 text-3xl"></i>
+                    <h1 class="text-2xl font-bold tracking-tight">AI Car <span class="text-sky-400">Copilot</span></h1>
+                </div>
                 
-                originalNames[i] = inputField.value.trim() || heroClass;
-                classNames.push(heroClass);
+                <div class="flex items-center space-x-2">
+                    <button onclick="triggerReset()" id="resetBtn" class="bg-rose-950/20 hover:bg-rose-950/50 text-rose-400 font-semibold px-4 py-2 rounded-lg text-sm transition flex items-center space-x-2 border border-rose-900/30 shadow-sm cursor-pointer">
+                        <i class="fa-solid fa-trash-can"></i> <span>Reset Slate</span>
+                    </button>
+                    <button onclick="triggerCrawl()" id="crawlBtn" class="bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold px-4 py-2 rounded-lg text-sm transition flex items-center space-x-2 border border-slate-700/60 shadow-sm cursor-pointer">
+                        <i class="fa-solid fa-rotate"></i> <span>Sync All Dealers Data</span>
+                    </button>
+                </div>
+            </header>
+
+            <section class="bg-slate-800/60 backdrop-blur rounded-2xl p-6 border border-slate-700/50 shadow-xl mb-8">
+                <div class="flex justify-between items-center mb-2">
+                    <label class="block text-sm font-medium text-slate-400 tracking-wide uppercase">Describe your ideal car</label>
+                    <button onclick="saveCurrentAsSuggestion()" class="text-xs font-bold text-sky-400 hover:text-sky-300 transition flex items-center space-x-1 cursor-pointer">
+                        <i class="fa-solid fa-bookmark"></i> <span>Save query as badge</span>
+                    </button>
+                </div>
                 
-                inputField.value = "...";
-                inputField.disabled = true;
-            }
+                <div class="flex flex-col md:flex-row gap-3">
+                    <input type="text" id="queryInput" 
+                        placeholder="e.g., Nissan e-power car from IM Used Car..." 
+                        class="flex-1 bg-slate-950/80 border border-slate-700 text-white rounded-xl px-4 py-3.5 focus:outline-none focus:border-sky-500 transition shadow-inner placeholder-slate-500">
+                    <button onclick="searchCars()" id="searchBtn" class="bg-sky-500 hover:bg-sky-600 text-white font-semibold px-6 py-3.5 rounded-xl transition shadow-lg flex items-center justify-center space-x-2 shrink-0 cursor-pointer">
+                        <i class="fa-solid fa-wand-magic-sparkles"></i> <span>Analyze with AI</span>
+                    </button>
+                </div>
 
-            aiBtn.innerHTML = "⏳ Summoning...";
-            aiBtn.disabled = true;
-
-            try {
-                const randomSeed = Math.floor(Math.random() * 1000000);
-                
-                // Batch Prompt: Ask for all names at once in a comma-separated format
-                const prompt = `You are a fantasy name generator. Generate exactly ${count} highly creative, unique first names for these classes respectively: ${classNames.join(', ')}. If the UI request language implies it, format names to match that culture. Reply ONLY with a comma-separated list of the names. No numbers, no bullet points, no extra text. Random Seed: ${randomSeed}`;
-                
-                const response = await fetch(`https://text.pollinations.ai/${encodeURIComponent(prompt)}?nocache=${randomSeed}`);
-                
-                if (!response.ok) throw new Error("Server Error");
-                
-                let resultText = await response.text();
-                
-                // Clean up the string and split it into an array
-                let generatedNames = resultText.replace(/["'\n\.]/g, "").split(',').map(n => n.trim());
-                
-                // Distribute the new names to the inputs
-                for (let i = 1; i <= count; i++) {
-                    const inputField = document.getElementById(`p${i}-name`);
-                    // If the AI somehow failed to give enough names, fallback to the original
-                    let finalName = generatedNames[i-1] ? generatedNames[i-1].split(" ")[0] : originalNames[i];
-                    inputField.value = finalName;
-                    inputField.disabled = false;
-                }
-                
-            } catch (error) {
-                console.error("AI Error Details:", error);
-                alert(`❌ AI Connection failed. Please check your internet connection.`);
-                
-                // Revert to original names on failure
-                for (let i = 1; i <= count; i++) {
-                    const inputField = document.getElementById(`p${i}-name`);
-                    inputField.value = originalNames[i];
-                    inputField.disabled = false;
-                }
-            } finally {
-                // Restore button state
-                aiBtn.innerHTML = originalBtnText;
-                aiBtn.disabled = false;
-            }
-        }
-        // ==========================================
-
-        // ==========================================
-        // LOCALIZATION (i18n) & DYNAMIC LOGS
-        // ==========================================
-        const i18n = {
-            zh: {
-                title: "龍戰士任務 🐉", designer: "遊戲設計：Colette", rulesTitle: "📜 任務規則",
-                ruleGoal: "<strong>目標：</strong>準確到達 <span class='hl'>100號格子</span> 擊敗巨龍！超出則會後退。",
-                rulePortals: "<strong>傳送門與陷阱：</strong><span class='hl'>魔法傳送門 🌀</span> 讓你前進。<span class='hl'>巨龍陷阱 🔥</span> 讓你後退。",
-                ruleShield: "<strong>寶石護盾：</strong>自動消耗 <span class='hl'>💎 寶石</span>（花費取決於職業）摧毀陷阱，保你安全！",
-                ruleMilestone: "<strong>里程碑：</strong>經過 <span class='hl'>25, 50, 75</span> 號格子會獲得裝滿寶石的 <span class='hl'>寶箱</span>。",
-                ruleClasses: "<strong>英雄職業：</strong>每個英雄都有 <span class='hl'>獨特技能</span>。選擇你最喜歡的，或隨機分配！",
-                prepBattle: "⚔️ 準備戰鬥 ⚔️", btnRandom: "🎲 隨機分配", btnStart: "開始任務", btnMenu: "⬅️ 菜單", btnRoll: "擲骰子 🎲",
-                btnAINames: "✨ AI 自動命名所有玩家",
-                classes: {
-                    '🛡️': { name: '騎士', desc: '護盾僅需1顆寶石。里程碑額外獲得+1寶石。' },
-                    '🏹': { name: '遊俠', desc: '每次擲骰子點數+1。' },
-                    '🧙': { name: '法師', desc: '傳送門獲得3寶石。自動消耗5寶石在前方開啟傳送門。' },
-                    '🥷': { name: '忍者', desc: '擲出6可獲得額外回合。' },
-                    '🧛': { name: '吸血鬼', desc: '觸發陷阱時與領先者互換位置。若自己領先，則獲得3寶石。' },
-                    '🧚': { name: '仙女', desc: '開局3寶石。擲出6時全員獲得1回合護盾，並各向你上貢1寶石。' },
-                    '🐺': { name: '狼人', desc: '狼形態免疫1次陷阱。觸發後變回人類，再次觸發陷阱後變回狼。' },
-                    '👑': { name: '皇室', desc: '在終點永遠不會被反彈後退。' },
-                    '🦉': { name: '學者', desc: '使用後關閉傳送門。加深陷阱，將其目的地推向更低的格子。' }
-                },
-                logs: {
-                    logStart: "系統：任務開始！",
-                    logRoll: (t, n, r) => `${t} ${n} 擲出了 ${r}！`,
-                    logRangerBonus: " (+1 遊俠速度)",
-                    logFairyMagic: "🧚 仙女魔法！擲出了 6！所有人獲得1回合陷阱免疫，並進貢！",
-                    logTribute: (g, r) => `💎 ${g} 給了 ${r} 1 顆寶石。`,
-                    logRoyalStop: (n) => `👑 ${n} 使用皇室特權，精準停在龍穴！`,
-                    logBounce: (t, n, p) => `${t} ${n} 走過頭了！反彈回到 ${p}。`,
-                    logPortal: (t, n, j, p) => `✨ 傳送門！${t} ${n} 獲得了 💎 ${j} 顆寶石並跳躍到 ${p}！`,
-                    logScholarClose: (p) => `🦉 知識！學者永久關閉了 ${p} 的傳送門！`,
-                    logWerewolfImmune: (p) => `🐺 吼！狼人對 ${p} 的陷阱免疫！（變回人類 👨）`,
-                    logFairyWard: (t, n, p) => `🧚 仙女護衛！${t} ${n} 對 ${p} 的陷阱免疫！`,
-                    logShielded: (t, n, c, p) => `🛡️ 護盾抵擋！${t} ${n} 消耗 💎 ${c} 顆寶石粉碎了 ${p} 的陷阱！`,
-                    logWolfTransform: (n) => `🐺 滿月！${n} 變回了狼人！`,
-                    logVampireFeed: (n, p) => `🔥 陷阱！🧛 ${n} 掉落到了 ${p}！吸血鬼在暗中吸血，獲得了 💎 3 顆寶石！`,
-                    logVampireSwap: (n1, n2, p) => `🔥 陷阱！🧛 鮮血魔法！${n1} 與 ${n2} 交換了位置！${n2} 被拖下到 ${p}！`,
-                    logTrap: (t, n, s, e) => `🔥 陷阱！${t} ${n} 從 ${s} 掉落回 ${e}！`,
-                    logScholarTrap: (s, e) => `🦉 煉金術！學者加深了 ${s} 的陷阱！下一個受害者將一直掉落到 ${e}！`,
-                    logMoveSafe: (t, n, p) => `${t} ${n} 安全移動到格子 ${p}。`,
-                    logMilestone: (t, n, p, a) => `🎁 里程碑！${t} ${n} 跨越了格子 ${p}，找到一個裝有 💎 ${a} 顆寶石的寶箱！`,
-                    logMagePortal: (t, n, s, e) => `🌌 鍛造傳送門！${t} ${n} 自動消耗 5 顆寶石撕裂空間，從 ${s} 跳躍到 ${e}！`,
-                    logWin: (t, n) => `⚔️ 史詩之戰！⚔️ ${t} ${n} 擊敗了巨龍！`,
-                    turnWin: (t, n) => `👑 ${t} ${n} 獲勝！👑`,
-                    logNinja: (n) => `🥷 忍者反射！${n} 擲出了 6，獲得額外回合！`,
-                    turnIndicator: (t, n) => `${t} ${n} 的回合`
-                }
-            },
-            en: {
-                title: "Dragon Warrior Quest 🐉", designer: "Game Design by Colette", rulesTitle: "📜 Quest Rules",
-                ruleGoal: "<strong>The Goal:</strong> Reach exactly <span class='hl'>Tile 100</span> to defeat the Dragon! Overshooting bounces you back.",
-                rulePortals: "<strong>Portals & Traps:</strong> <span class='hl'>Magic Portals 🌀</span> jump you forward. <span class='hl'>Dragon Traps 🔥</span> drop you backward.",
-                ruleShield: "<strong>Jewel Shield:</strong> Spend <span class='hl'>💎 Jewels</span> automatically to shatter a trap and stay safe!",
-                ruleMilestone: "<strong>Milestones:</strong> Passing tiles <span class='hl'>25, 50, and 75</span> yields <span class='hl'>Treasure Chests</span> containing Jewels.",
-                ruleClasses: "<strong>Hero Classes:</strong> Every Hero has a <span class='hl'>unique ability</span>. Pick your favorite or Randomize!",
-                prepBattle: "⚔️ Prepare for Battle ⚔️", btnRandom: "🎲 Randomize", btnStart: "Start Quest", btnMenu: "⬅️ Menu", btnRoll: "Roll Dice 🎲",
-                btnAINames: "✨ AI Auto-Name All Players",
-                classes: {
-                    '🛡️': { name: 'Knight', desc: 'Trap shields cost 1 Jewel. Gains extra +1 Jewel from Milestones.' },
-                    '🏹': { name: 'Ranger', desc: '+1 to every dice roll.' },
-                    '🧙': { name: 'Mage', desc: 'Earns 3 Jewels from Portals. Auto-spends 5 Jewels to Forge a Portal forward.' },
-                    '🥷': { name: 'Ninja', desc: 'Rolling a 6 grants a bonus turn.' },
-                    '🧛': { name: 'Vampire', desc: 'Swaps with leader when trapped. If leading, gains 3 Jewels instead.' },
-                    '🧚': { name: 'Fairy', desc: 'Starts with 3 Jewels. Rolling 6 shields everyone and taxes 1 Jewel each.' },
-                    '🐺': { name: 'Werewolf', desc: 'Immune to 1 Trap as a Wolf. Changes to Human after a trap, and back to Wolf after next.' },
-                    '👑': { name: 'Royal', desc: 'Never bounces back at the end of the board.' },
-                    '🦉': { name: 'Scholar', desc: 'Closes Portals. Deepens Traps, pushing their destination lower after use.' }
-                },
-                logs: {
-                    logStart: "System: The Quest begins!",
-                    logRoll: (t, n, r) => `${t} ${n} rolled a ${r}!`,
-                    logRangerBonus: " (+1 Ranger Speed)",
-                    logFairyMagic: "🧚 FAIRY MAGIC! Rolled a 6! Everyone gets Trap Immunity for 1 turn, and pays tribute!",
-                    logTribute: (g, r) => `💎 ${g} gave 1 Jewel to ${r}.`,
-                    logRoyalStop: (n) => `👑 ${n} used Royal privilege to stop exactly at the Lair!`,
-                    logBounce: (t, n, p) => `${t} ${n} overshot! Bounced back to ${p}.`,
-                    logPortal: (t, n, j, p) => `✨ PORTAL! ${t} ${n} earned 💎 ${j} Jewel(s) and jumped to ${p}!`,
-                    logScholarClose: (p) => `🦉 KNOWLEDGE! The Scholar permanently closed the portal at ${p}!`,
-                    logWerewolfImmune: (p) => `🐺 ROAR! The Werewolf is immune to the trap at ${p}! (Transforms to Human 👨)`,
-                    logFairyWard: (t, n, p) => `🧚 FAIRY WARD! ${t} ${n} is immune to the trap at ${p}!`,
-                    logShielded: (t, n, c, p) => `🛡️ SHIELDED! ${t} ${n} spent 💎 ${c} Jewel(s) to shatter the trap at ${p}!`,
-                    logWolfTransform: (n) => `🐺 FULL MOON! ${n} transforms back into a Werewolf!`,
-                    logVampireFeed: (n, p) => `🔥 TRAP! 🧛 ${n} fell to ${p}! The Vampire fed in the dark and gained 💎 3 Jewels!`,
-                    logVampireSwap: (n1, n2, p) => `🔥 TRAP! 🧛 BLOOD MAGIC! ${n1} swapped places with ${n2}! ${n2} is dragged down to ${p}!`,
-                    logTrap: (t, n, s, e) => `🔥 TRAP! ${t} ${n} fell from ${s} back to ${e}!`,
-                    logScholarTrap: (s, e) => `🦉 ALCHEMY! The Scholar deepened the trap at ${s}! The next victim will fall all the way to ${e}!`,
-                    logMoveSafe: (t, n, p) => `${t} ${n} moved safely to tile ${p}.`,
-                    logMilestone: (t, n, p, a) => `🎁 MILESTONE! ${t} ${n} crossed tile ${p} and found a Treasure Chest with 💎 ${a} Jewels!`,
-                    logMagePortal: (t, n, s, e) => `🌌 FORGE PORTAL! ${t} ${n} automatically spent 5 Jewels and ripped space to jump from ${s} to ${e}!`,
-                    logWin: (t, n) => `⚔️ EPIC BATTLE! ⚔️ ${t} ${n} defeated the Dragon!`,
-                    turnWin: (t, n) => `👑 ${t} ${n} WINS! 👑`,
-                    logNinja: (n) => `🥷 NINJA REFLEXES! ${n} rolled a 6 and gets a bonus turn!`,
-                    turnIndicator: (t, n) => `${t} ${n}'s Turn`
-                }
-            },
-            ja: {
-                title: "ドラゴンウォリアークエスト 🐉", designer: "ゲームデザイン: Colette", rulesTitle: "📜 クエストのルール",
-                ruleGoal: "<strong>目標:</strong> 正確に <span class='hl'>100マス目</span> に到達してドラゴンを倒せ！行き過ぎると戻される。",
-                rulePortals: "<strong>ポータルと罠:</strong> <span class='hl'>魔法のポータル 🌀</span> は前進。<span class='hl'>ドラゴンの罠 🔥</span> は後退。",
-                ruleShield: "<strong>宝石の盾:</strong> 自動で <span class='hl'>💎 宝石</span> を消費して罠を破壊し、安全を確保！",
-                ruleMilestone: "<strong>マイルストーン:</strong> <span class='hl'>25, 50, 75</span> マスを通過すると宝石入りの <span class='hl'>宝箱</span> を獲得。",
-                ruleClasses: "<strong>ヒーロークラス:</strong> 全てのヒーローに <span class='hl'>固有の能力</span> がある！選ぶかランダムで決めよう！",
-                prepBattle: "⚔️ 戦闘の準備 ⚔️", btnRandom: "🎲 ランダム", btnStart: "クエスト開始", btnMenu: "⬅️ メニュー", btnRoll: "サイコロを振る 🎲",
-                btnAINames: "✨ AIで全プレイヤーの名前を生成",
-                classes: {
-                    '🛡️': { name: '騎士', desc: '盾のコストが1宝石。宝箱から+1宝石。' },
-                    '🏹': { name: 'レンジャー', desc: 'サイコロの目に常に+1。' },
-                    '🧙': { name: '魔法使い', desc: 'ポータルで3宝石獲得。5宝石を自動消費し前方へワープ。' },
-                    '🥷': { name: '忍者', desc: '6を出すと追加ターン。' },
-                    '🧛': { name: '吸血鬼', desc: '罠にかかると先頭のプレイヤーと場所を入れ替える。自身が先頭なら3宝石獲得。' },
-                    '🧚': { name: '妖精', desc: '初期宝石3。6を出すと全員に盾を付与し、各プレイヤーから1宝石徴収。' },
-                    '🐺': { name: '人狼', desc: '狼形態で罠を1回無効化。罠後人間に戻り、次の罠で再び狼になる。' },
-                    '👑': { name: '王族', desc: 'ゴールで行き過ぎても戻されない。' },
-                    '🦉': { name: '学者', desc: '使用後ポータルを閉じる。罠を深くし、落下先をさらに下へ移動させる。' }
-                },
-                logs: {
-                    logStart: "システム: クエスト開始！",
-                    logRoll: (t, n, r) => `${t} ${n} は ${r} を出した！`,
-                    logRangerBonus: " (+1 レンジャースピード)",
-                    logFairyMagic: "🧚 妖精の魔法！6を出した！全員が1ターンの罠免疫を得て、貢ぎ物を支払う！",
-                    logTribute: (g, r) => `💎 ${g} が ${r} に1宝石を渡した。`,
-                    logRoyalStop: (n) => `👑 ${n} は王族の特権を使い、ドラゴンの巣にぴったり止まった！`,
-                    logBounce: (t, n, p) => `${t} ${n} は行き過ぎた！ ${p} に戻される。`,
-                    logPortal: (t, n, j, p) => `✨ ポータル！${t} ${n} は 💎 ${j} 宝石を獲得し、 ${p} にワープした！`,
-                    logScholarClose: (p) => `🦉 知識！学者が ${p} のポータルを永久に閉じた！`,
-                    logWerewolfImmune: (p) => `🐺 ガオー！人狼は ${p} の罠を無効化した！（人間に戻る 👨）`,
-                    logFairyWard: (t, n, p) => `🧚 妖精の守護！${t} ${n} は ${p} の罠を無効化した！`,
-                    logShielded: (t, n, c, p) => `🛡️ 盾発動！${t} ${n} は 💎 ${c} 宝石を消費し、 ${p} の罠を破壊した！`,
-                    logWolfTransform: (n) => `🐺 満月！${n} は人狼に戻った！`,
-                    logVampireFeed: (n, p) => `🔥 罠！🧛 ${n} は ${p} に落ちた！吸血鬼は闇の中で血を吸い、💎 3 宝石を獲得した！`,
-                    logVampireSwap: (n1, n2, p) => `🔥 罠！🧛 血の魔法！${n1} は ${n2} と場所を入れ替えた！${n2} は ${p} に引きずり落とされた！`,
-                    logTrap: (t, n, s, e) => `🔥 罠！${t} ${n} は ${s} から ${e} に落ちた！`,
-                    logScholarTrap: (s, e) => `🦉 錬金術！学者が ${s} の罠を深くした！次の犠牲者は ${e} まで落ちるだろう！`,
-                    logMoveSafe: (t, n, p) => `${t} ${n} は安全にマス ${p} に移動した。`,
-                    logMilestone: (t, n, p, a) => `🎁 マイルストーン！${t} ${n} はマス ${p} を通過し、💎 ${a} 宝石入りの宝箱を見つけた！`,
-                    logMagePortal: (t, n, s, e) => `🌌 空間創造！${t} ${n} は自動で5宝石を消費し、空間を裂いて ${s} から ${e} にワープした！`,
-                    logWin: (t, n) => `⚔️ 壮絶な戦い！⚔️ ${t} ${n} はドラゴンを倒した！`,
-                    turnWin: (t, n) => `👑 ${t} ${n} の勝利！👑`,
-                    logNinja: (n) => `🥷 忍者の反射神経！${n} は6を出し、追加ターンを得た！`,
-                    turnIndicator: (t, n) => `${t} ${n}のターン`
-                }
-            },
-            es: {
-                title: "Búsqueda del Guerrero Dragón 🐉", designer: "Diseño de juego por Colette", rulesTitle: "📜 Reglas de la Misión",
-                ruleGoal: "<strong>El Objetivo:</strong> ¡Llega exactamente a la <span class='hl'>Casilla 100</span> para vencer al Dragón! Si te pasas, rebotas.",
-                rulePortals: "<strong>Portales y Trampas:</strong> Los <span class='hl'>Portales Mágicos 🌀</span> te adelantan. Las <span class='hl'>Trampas de Dragón 🔥</span> te retrasan.",
-                ruleShield: "<strong>Escudo de Joyas:</strong> ¡Gasta automáticamente <span class='hl'>💎 Joyas</span> para destruir una trampa y mantenerte a salvo!",
-                ruleMilestone: "<strong>Hitos:</strong> Pasar las casillas <span class='hl'>25, 50 y 75</span> te otorga <span class='hl'>Cofres del Tesoro</span> con Joyas.",
-                ruleClasses: "<strong>Clases de Héroes:</strong> Cada Héroe tiene una <span class='hl'>habilidad única</span>. ¡Elige o hazlo Aleatorio!",
-                prepBattle: "⚔️ Prepárate para la Batalla ⚔️", btnRandom: "🎲 Aleatorio", btnStart: "Iniciar Misión", btnMenu: "⬅️ Menú", btnRoll: "Tirar Dado 🎲",
-                btnAINames: "✨ IA Auto-nombrar a todos",
-                classes: {
-                    '🛡️': { name: 'Caballero', desc: 'El escudo cuesta 1 Joya. Gana +1 Joya extra de los Cofres.' },
-                    '🏹': { name: 'Explorador', desc: '+1 a cada tirada de dado.' },
-                    '🧙': { name: 'Mago', desc: 'Gana 3 Joyas en Portales. Gasta 5 Joyas auto para forjar un portal adelante.' },
-                    '🥷': { name: 'Ninja', desc: 'Sacar un 6 otorga un turno extra.' },
-                    '🧛': { name: 'Vampiro', desc: 'Cambia posición con el líder en trampas. Si lidera, gana 3 Joyas.' },
-                    '🧚': { name: 'Hada', desc: 'Empieza con 3 Joyas. Sacar 6 escuda a todos y le pagan 1 Joya cada uno.' },
-                    '🐺': { name: 'Hombre Lobo', desc: 'Inmune a 1 trampa como Lobo. Cambia a Humano tras una trampa, y vuelve a Lobo en la siguiente.' },
-                    '👑': { name: 'Realeza', desc: 'Nunca rebota al final del tablero.' },
-                    '🦉': { name: 'Erudito', desc: 'Cierra Portales tras usarlos. Profundiza las Trampas, bajando su destino.' }
-                },
-                logs: {
-                    logStart: "Sistema: ¡La misión comienza!",
-                    logRoll: (t, n, r) => `¡${t} ${n} sacó un ${r}!`,
-                    logRangerBonus: " (+1 Velocidad de Explorador)",
-                    logFairyMagic: "🧚 ¡MAGIA DE HADA! ¡Sacó un 6! ¡Todos obtienen Inmunidad a Trampas por 1 turno y pagan tributo!",
-                    logTribute: (g, r) => `💎 ${g} le dio 1 Joya a ${r}.`,
-                    logRoyalStop: (n) => `👑 ¡${n} usó el privilegio Real para detenerse exactamente en la Guarida!`,
-                    logBounce: (t, n, p) => `¡${t} ${n} se pasó! Rebotó a la casilla ${p}.`,
-                    logPortal: (t, n, j, p) => `✨ ¡PORTAL! ¡${t} ${n} ganó 💎 ${j} Joya(s) y saltó a ${p}!`,
-                    logScholarClose: (p) => `🦉 ¡CONOCIMIENTO! ¡El Erudito cerró permanentemente el portal en ${p}!`,
-                    logWerewolfImmune: (p) => `🐺 ¡ROAR! ¡El Hombre Lobo es inmune a la trampa en ${p}! (Se transforma en Humano 👨)`,
-                    logFairyWard: (t, n, p) => `🧚 ¡PROTECCIÓN DE HADA! ¡${t} ${n} es inmune a la trampa en ${p}!`,
-                    logShielded: (t, n, c, p) => `🛡️ ¡ESCUDADO! ¡${t} ${n} gastó 💎 ${c} Joya(s) para destruir la trampa en ${p}!`,
-                    logWolfTransform: (n) => `🐺 ¡LUNA LLENA! ¡${n} se transforma de nuevo en Hombre Lobo!`,
-                    logVampireFeed: (n, p) => `🔥 ¡TRAMPA! 🧛 ¡${n} cayó a ${p}! ¡El Vampiro se alimentó en la oscuridad y ganó 💎 3 Joyas!`,
-                    logVampireSwap: (n1, n2, p) => `🔥 ¡TRAMPA! 🧛 ¡MAGIA DE SANGRE! ¡${n1} intercambió lugar con ${n2}! ¡${n2} es arrastrado hacia abajo a ${p}!`,
-                    logTrap: (t, n, s, e) => `🔥 ¡TRAMPA! ¡${t} ${n} cayó desde ${s} hasta ${e}!`,
-                    logScholarTrap: (s, e) => `🦉 ¡ALQUIMIA! ¡El Erudito profundizó la trampa en ${s}! ¡La próxima víctima caerá hasta ${e}!`,
-                    logMoveSafe: (t, n, p) => `${t} ${n} se movió con seguridad a la casilla ${p}.`,
-                    logMilestone: (t, n, p, a) => `🎁 ¡HITO! ¡${t} ${n} cruzó la casilla ${p} y encontró un Cofre del Tesoro con 💎 ${a} Joyas!`,
-                    logMagePortal: (t, n, s, e) => `🌌 ¡FORJAR PORTAL! ¡${t} ${n} gastó automáticamente 5 Joyas y abrió el espacio para saltar de ${s} a ${e}!`,
-                    logWin: (t, n) => `⚔️ ¡BATALLA ÉPICA! ⚔️ ¡${t} ${n} derrotó al Dragón!`,
-                    turnWin: (t, n) => `👑 ¡${t} ${n} GANA! 👑`,
-                    logNinja: (n) => `🥷 ¡REFLEJOS NINJA! ¡${n} sacó un 6 y obtiene un turno extra!`,
-                    turnIndicator: (t, n) => `Turno de ${t} ${n}`
-                }
-            }
-        };
-
-        let currentLang = 'zh';
-        
-        function changeLanguage() {
-            currentLang = document.getElementById('lang-select').value;
-            document.querySelectorAll('[data-i18n]').forEach(el => {
-                const key = el.getAttribute('data-i18n');
-                if (i18n[currentLang][key]) el.innerHTML = i18n[currentLang][key];
-            });
-            if (document.getElementById('setup-screen').style.display !== 'none') {
-                updatePlayerInputs();
-            } else {
-                updateUI();
-            }
-        }
-        // ==========================================
-
-        const WINNING_TILE = 100;
-        const COLORS = ['#e74c3c', '#3498db', '#9b59b6', '#2ecc71']; 
-        const HERO_KEYS = ['🛡️', '🏹', '🧙', '🥷', '🧛', '🧚', '🐺', '👑', '🦉'];
-        
-        let PORTALS = {}; 
-        let TRAPS = {};  
-        let players = [];
-        let currentPlayerIndex = 0;
-        let gameWon = false;
-
-        window.onload = function() {
-            document.getElementById('lang-select').value = currentLang;
-            changeLanguage();
-        };
-
-        function changeHeroDesc(playerIndex) {
-            const selectedIcon = document.getElementById(`p${playerIndex}-icon`).value;
-            const descSpan = document.getElementById(`p${playerIndex}-desc`);
-            descSpan.innerText = i18n[currentLang].classes[selectedIcon].desc;
-            
-            const nameInput = document.getElementById(`p${playerIndex}-name`);
-            nameInput.value = i18n[currentLang].classes[selectedIcon].name;
-        }
-
-        function updatePlayerInputs() {
-            const count = document.getElementById('player-count').value;
-            const container = document.getElementById('player-inputs');
-            
-            const currentNames = [];
-            for (let i = 1; i <= 4; i++) {
-                const input = document.getElementById(`p${i}-name`);
-                currentNames[i] = input ? input.value : null;
-            }
-
-            container.innerHTML = '';
-            
-            let iconOptionsHTML = '';
-            for (const icon of HERO_KEYS) {
-                iconOptionsHTML += `<option value="${icon}">${icon} ${i18n[currentLang].classes[icon].name}</option>`;
-            }
-
-            for (let i = 1; i <= count; i++) {
-                let defaultName = currentNames[i] || i18n[currentLang].classes['🛡️'].name;
-                container.innerHTML += `
-                    <div class="player-setup-box">
-                        <div class="player-row">
-                            <select id="p${i}-icon" onchange="changeHeroDesc(${i})" style="flex: 1; min-width: 120px;">${iconOptionsHTML}</select>
-                            <input type="text" id="p${i}-name" placeholder="Name" value="${defaultName}" style="flex: 2; min-width: 150px;">
-                        </div>
-                        <span id="p${i}-desc" class="skill-desc">${i18n[currentLang].classes['🛡️'].desc}</span>
-                    </div>`;
-            }
-        }
-
-        function randomizeHeroes() {
-            const count = document.getElementById('player-count').value;
-            for (let i = 1; i <= count; i++) {
-                const selectElement = document.getElementById(`p${i}-icon`);
-                const randomIcon = HERO_KEYS[Math.floor(Math.random() * HERO_KEYS.length)];
-                selectElement.value = randomIcon;
-                changeHeroDesc(i);
-            }
-        }
-
-        function resetGame() {
-            players = [];
-            currentPlayerIndex = 0;
-            gameWon = false;
-            
-            document.getElementById('game-screen').style.display = 'none';
-            document.getElementById('setup-screen').style.display = 'block';
-            
-            document.getElementById('board').innerHTML = '';
-            document.getElementById('log').innerHTML = '';
-            document.getElementById('stats-container').innerHTML = '';
-            document.getElementById('dice-result').innerText = '';
-            document.getElementById('roll-btn').style.display = 'inline-block';
-            
-            updatePlayerInputs(); 
-        }
-
-        function generateRandomMaze() {
-            PORTALS = {}; TRAPS = {};
-            let usedTiles = new Set([1, WINNING_TILE]); 
-
-            for(let i = 0; i < 8; i++) {
-                let start = getRandomTile(2, 80, usedTiles); usedTiles.add(start);
-                let end = getRandomTile(start + 10, 95, usedTiles); PORTALS[start] = end;
-            }
-            for(let i = 0; i < 8; i++) {
-                let start = getRandomTile(20, 98, usedTiles); usedTiles.add(start);
-                let end = getRandomTile(5, start - 10, usedTiles); TRAPS[start] = end;
-            }
-        }
-
-        function getRandomTile(min, max, excludeSet) {
-            let tile;
-            do { tile = Math.floor(Math.random() * (max - min + 1)) + min; } while (excludeSet.has(tile));
-            return tile;
-        }
-
-        function startGame() {
-            const count = document.getElementById('player-count').value;
-            for (let i = 1; i <= count; i++) {
-                let name = document.getElementById(`p${i}-name`).value || `Hero ${i}`;
-                let icon = document.getElementById(`p${i}-icon`).value;
-                let initialJewels = (icon === '🧚') ? 3 : 0; 
-                players.push({ 
-                    name: name, position: 1, jewels: initialJewels, token: icon, color: COLORS[i-1],
-                    milestones: { 25: false, 50: false, 75: false },
-                    fairyWardTurns: 0,
-                    isWerewolf: (icon === '🐺') ? true : false 
-                });
-            }
-            
-            generateRandomMaze(); 
-            
-            document.getElementById('setup-screen').style.display = 'none';
-            document.getElementById('game-screen').style.display = 'block';
-            
-            createBoard(); updateUI();
-            logMessage(i18n[currentLang].logs.logStart);
-        }
-
-        function createBoard() {
-            const board = document.getElementById('board');
-            board.innerHTML = ''; 
-            for (let row = 9; row >= 0; row--) {
-                for (let col = 0; col < 10; col++) {
-                    let tileNum = (row % 2 !== 0) ? (row * 10) + col + 1 : (row * 10) + (9 - col) + 1; 
-                    
-                    let tile = document.createElement('div');
-                    tile.className = 'tile';
-                    tile.id = 'tile-' + tileNum;
-                    
-                    let numLabel = document.createElement('span');
-                    numLabel.innerText = tileNum;
-                    numLabel.style.position = 'relative';
-                    numLabel.style.zIndex = '2';
-                    tile.appendChild(numLabel);
-
-                    if (PORTALS[tileNum]) {
-                        tile.classList.add('portal');
-                        let dest = document.createElement('div');
-                        dest.className = 'dest-label';
-                        dest.innerText = `↗ ${PORTALS[tileNum]}`;
-                        tile.appendChild(dest);
-                    }
-                    if (TRAPS[tileNum]) {
-                        tile.classList.add('trap');
-                        let dest = document.createElement('div');
-                        dest.className = 'dest-label';
-                        dest.innerText = `↘ ${TRAPS[tileNum]}`;
-                        tile.appendChild(dest);
-                    }
-                    
-                    if (tileNum === 1) tile.classList.add('start');
-                    if (tileNum === WINNING_TILE) { 
-                        tile.classList.add('end'); 
-                        numLabel.innerText = '🐉'; 
-                    }
-                    
-                    board.appendChild(tile);
-                }
-            }
-        }
-
-        function checkMilestones(p, newPos) {
-            const tiers = [25, 50, 75];
-            tiers.forEach(ms => {
-                if (newPos >= ms && !p.milestones[ms]) {
-                    p.milestones[ms] = true;
-                    let amount = (p.token === '🛡️') ? 3 : 2; 
-                    p.jewels += amount;
-                    logMessage(i18n[currentLang].logs.logMilestone(p.token, p.name, ms, amount));
-                }
-            });
-        }
-
-        function takeTurn() {
-            if (gameWon) return;
-
-            let p = players[currentPlayerIndex];
-            let displayToken = (p.token === '🐺' && !p.isWerewolf) ? '👨' : p.token;
-            let baseRoll = Math.floor(Math.random() * 6) + 1;
-            let moveAmount = baseRoll;
-            
-            let rollMsg = i18n[currentLang].logs.logRoll(displayToken, p.name, baseRoll);
-
-            if (p.token === '🏹') { 
-                moveAmount += 1; 
-                rollMsg += i18n[currentLang].logs.logRangerBonus; 
-            }
-            
-            if (p.token === '🧚' && baseRoll === 6) {
-                logMessage(i18n[currentLang].logs.logFairyMagic);
-                players.forEach(op => {
-                    op.fairyWardTurns = (op === p) ? 2 : 1; 
-                    if (op !== p && op.jewels > 0) {
-                        op.jewels--;
-                        p.jewels++;
-                        logMessage(i18n[currentLang].logs.logTribute(op.name, p.name));
-                    }
-                });
-            }
-
-            document.getElementById('dice-result').innerText = rollMsg;
-            
-            p.position += moveAmount;
-
-            if (p.position > WINNING_TILE) {
-                if (p.token === '👑') {
-                    p.position = WINNING_TILE;
-                    logMessage(i18n[currentLang].logs.logRoyalStop(p.name));
-                } else {
-                    p.position = WINNING_TILE - (p.position - WINNING_TILE);
-                    logMessage(i18n[currentLang].logs.logBounce(displayToken, p.name, p.position));
-                }
-            }
-
-            if (PORTALS[p.position]) {
-                let portalStart = p.position;
-                let earnedJewels = (p.token === '🧙') ? 3 : 1; 
-                p.jewels += earnedJewels;
-                logMessage(i18n[currentLang].logs.logPortal(displayToken, p.name, earnedJewels, PORTALS[p.position]));
-                p.position = PORTALS[p.position];
-
-                if (p.token === '🦉') {
-                    delete PORTALS[portalStart];
-                    logMessage(i18n[currentLang].logs.logScholarClose(portalStart));
-                    let oldTile = document.getElementById('tile-' + portalStart);
-                    if (oldTile) {
-                        oldTile.classList.remove('portal');
-                        let destLabel = oldTile.querySelector('.dest-label');
-                        if (destLabel) destLabel.remove();
-                    }
-                }
-            } 
-            else if (TRAPS[p.position]) {
-                let trapStart = p.position;
-                let trapEnd = TRAPS[trapStart];
-                let shieldCost = (p.token === '🛡️') ? 1 : 3; 
-
-                if (p.token === '🐺' && p.isWerewolf) {
-                    logMessage(i18n[currentLang].logs.logWerewolfImmune(p.position));
-                    p.isWerewolf = false; 
-                } 
-                else if (p.fairyWardTurns > 0) {
-                    logMessage(i18n[currentLang].logs.logFairyWard(displayToken, p.name, p.position));
-                    p.fairyWardTurns = 0; 
-                }
-                else if (p.jewels >= shieldCost) {
-                    p.jewels -= shieldCost;
-                    logMessage(i18n[currentLang].logs.logShielded(displayToken, p.name, shieldCost, p.position));
-                    if (p.token === '🐺' && !p.isWerewolf) {
-                        p.isWerewolf = true; 
-                        logMessage(i18n[currentLang].logs.logWolfTransform(p.name));
-                    }
-                } 
-                else {
-                    if (p.token === '🧛') {
-                        let highestPlayer = p;
-                        players.forEach(other => { if (other.position > highestPlayer.position) highestPlayer = other; });
-
-                        if (highestPlayer === p) {
-                            p.position = trapEnd;
-                            p.jewels += 3; 
-                            logMessage(i18n[currentLang].logs.logVampireFeed(p.name, trapEnd));
-                        } else {
-                            p.position = highestPlayer.position;
-                            highestPlayer.position = trapEnd;
-                            logMessage(i18n[currentLang].logs.logVampireSwap(p.name, highestPlayer.name, trapEnd));
-                        }
-                    } else {
-                        logMessage(i18n[currentLang].logs.logTrap(displayToken, p.name, trapStart, trapEnd));
-                        p.position = trapEnd;
-                    }
-                    
-                    if (p.token === '🐺' && !p.isWerewolf) {
-                        p.isWerewolf = true; 
-                        logMessage(i18n[currentLang].logs.logWolfTransform(p.name));
-                    }
-                }
-
-                if (p.token === '🦉') {
-                    let validLowerDests = [];
-                    for (let i = 2; i < trapEnd; i++) {
-                        validLowerDests.push(i);
-                    }
-                    if (validLowerDests.length > 0) {
-                        let randomIndex = Math.floor(Math.random() * validLowerDests.length);
-                        let newTrapEnd = validLowerDests[randomIndex];
-                        TRAPS[trapStart] = newTrapEnd;
-                        logMessage(i18n[currentLang].logs.logScholarTrap(trapStart, newTrapEnd));
-                        
-                        let trapTile = document.getElementById('tile-' + trapStart);
-                        if (trapTile) {
-                            let destLabel = trapTile.querySelector('.dest-label');
-                            if (destLabel) destLabel.innerText = `↘ ${newTrapEnd}`;
-                        }
-                    }
-                }
-            } else {
-                logMessage(i18n[currentLang].logs.logMoveSafe(displayToken, p.name, p.position));
-            }
-
-            checkMilestones(p, p.position);
-
-            if (p.token === '🧙' && p.jewels >= 5 && p.position < WINNING_TILE) {
-                p.jewels -= 5;
-                let minTarget = Math.min(WINNING_TILE, p.position + 6);
-                let maxTarget = WINNING_TILE;
-                let target = Math.floor(Math.random() * (maxTarget - minTarget + 1)) + minTarget;
-                
-                logMessage(i18n[currentLang].logs.logMagePortal(p.token, p.name, p.position, target));
-                p.position = target;
-                
-                checkMilestones(p, p.position); 
-            }
-
-            updateUI();
-
-            if (p.position === WINNING_TILE) {
-                gameWon = true;
-                document.getElementById('roll-btn').style.display = 'none';
-                logMessage(i18n[currentLang].logs.logWin(displayToken, p.name));
-                document.getElementById('turn-indicator').innerHTML = i18n[currentLang].logs.turnWin(displayToken, p.name);
-                return;
-            }
-
-            if (p.fairyWardTurns > 0) p.fairyWardTurns--;
-
-            if (p.token === '🥷' && baseRoll === 6) {
-                logMessage(i18n[currentLang].logs.logNinja(p.name));
-            } else {
-                currentPlayerIndex = (currentPlayerIndex + 1) % players.length;
-            }
-            
-            updateTurnIndicator();
-        }
-
-        function updateUI() {
-            let statsHTML = '';
-            players.forEach(p => {
-                let displayToken = (p.token === '🐺' && !p.isWerewolf) ? '👨' : p.token;
-                let wardIcon = (p.fairyWardTurns > 0) ? ' 🧚🛡️' : '';
-                let className = i18n[currentLang].classes[p.token].name;
-                let classDesc = i18n[currentLang].classes[p.token].desc;
-                
-                statsHTML += `
-                <div class="player-stat" style="border-left: 4px solid ${p.color}">
-                    <div class="stat-header">
-                        <span>${displayToken} ${p.name}${wardIcon}</span>
-                        <span>💎 ${p.jewels} | Tile: ${p.position}</span>
+                <div class="mt-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 pt-3 border-t border-slate-700/30">
+                    <div class="flex flex-wrap gap-2 items-center text-xs text-slate-400">
+                        <span class="font-medium shrink-0">Tags:</span>
+                        <div id="suggestionTray" class="flex flex-wrap gap-1.5"></div>
                     </div>
-                    <span class="stat-ability"><strong>${className}:</strong> ${classDesc}</span>
-                </div>`;
-            });
-            document.getElementById('stats-container').innerHTML = statsHTML;
+                    
+                    <div class="flex flex-wrap items-center gap-3">
+                        <select id="dealerSelect" onchange="displayCars()" class="bg-slate-900 border border-slate-700 text-slate-300 text-xs rounded-lg px-3 py-1.5 focus:outline-none focus:border-sky-500 transition cursor-pointer">
+                            <option value="ALL">All Dealers (所有車行)</option>
+                            <option value="DCH UCC">DCH UCC (大昌行)</option>
+                            <option value="IM Used Car">IM Used Car (英之傑)</option>
+                        </select>
 
-            document.querySelectorAll('.player-token').forEach(e => e.remove());
+                        <label class="inline-flex items-center space-x-2 cursor-pointer text-xs font-semibold text-slate-300 bg-slate-900/60 px-3 py-1.5 rounded-lg border border-slate-700/40 hover:bg-slate-900 transition">
+                            <input type="checkbox" id="hideSoldToggle" onchange="displayCars()" class="rounded border-slate-700 bg-slate-950 text-sky-500 focus:ring-0 focus:ring-offset-0 w-4 h-4">
+                            <span>Hide Sold Inventory (隱藏已售)</span>
+                        </label>
+                    </div>
+                </div>
+            </section>
 
-            players.forEach((p, index) => {
-                let tile = document.getElementById('tile-' + p.position);
-                if(tile) {
-                    let token = document.createElement('div');
-                    token.className = 'player-token';
-                    token.innerText = (p.token === '🐺' && !p.isWerewolf) ? '👨' : p.token;
-                    token.style.transform = `translate(${(index % 2 === 0 ? 1 : -1) * 4}px, ${(index > 1 ? 1 : -1) * 4}px)`;
-                    tile.appendChild(token);
-                }
-            });
+            <div id="filterStatus" class="hidden bg-slate-800/30 border border-slate-800 rounded-xl px-4 py-2.5 mb-6 text-xs text-slate-400 flex items-center justify-between">
+                <div>AI Parsed Target Filters: <span id="aiFiltersText" class="font-mono text-sky-400"></span></div>
+                <div id="matchCount" class="font-semibold text-slate-200"></div>
+            </div>
 
-            updateTurnIndicator();
-        }
+            <div id="loader" class="hidden flex flex-col items-center justify-center py-20 space-y-3">
+                <div class="w-10 h-10 border-4 border-sky-400 border-t-transparent rounded-full animate-spin"></div>
+                <p class="text-sm text-slate-400 animate-pulse">Qwen AI parsing query parameters...</p>
+            </div>
 
-        function updateTurnIndicator() {
-            if(!gameWon) {
-                let p = players[currentPlayerIndex];
-                let displayToken = (p.token === '🐺' && !p.isWerewolf) ? '👨' : p.token;
-                document.getElementById('turn-indicator').innerHTML = i18n[currentLang].logs.turnIndicator(displayToken, p.name);
-                document.getElementById('turn-indicator').style.color = p.color;
+            <main id="carGrid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6"></main>
+        </div>
+
+        <script>
+            let cachedCars = [];
+            
+            const DEFAULT_SUGGESTIONS = [
+                "Japanese hybrid under 10 years",
+                "Toyota or Honda built after 2020",
+                "Nissan e-power car",
+                "Cars from IM Used Car"
+            ];
+
+            function getCustomSuggestions() {
+                const stored = localStorage.getItem('custom_car_prompts');
+                return stored ? JSON.parse(stored) : [];
             }
-        }
 
-        function logMessage(msg) {
-            const log = document.getElementById('log');
-            log.innerHTML = `<div>> ${msg}</div>` + log.innerHTML;
-        }
-    </script>
-</body>
-</html>
+            function renderSuggestions() {
+                const tray = document.getElementById('suggestionTray');
+                tray.innerHTML = '';
+                
+                DEFAULT_SUGGESTIONS.forEach(text => {
+                    createTagElement(tray, text, false);
+                });
+
+                getCustomSuggestions().forEach(text => {
+                    createTagElement(tray, text, true);
+                });
+            }
+
+            function createTagElement(tray, text, canDelete) {
+                const wrapper = document.createElement('div');
+                wrapper.className = "inline-flex items-center bg-slate-900 border border-slate-700/60 rounded-md text-slate-300 overflow-hidden text-[11px] font-medium shadow-sm hover:border-slate-600 transition";
+                
+                const labelBtn = document.createElement('button');
+                labelBtn.className = "px-2.5 py-1 text-left cursor-pointer hover:text-white";
+                labelBtn.innerText = text;
+                labelBtn.onclick = () => setPrompt(text);
+                wrapper.appendChild(labelBtn);
+
+                if (canDelete) {
+                    const delBtn = document.createElement('button');
+                    delBtn.className = "px-1.5 py-1 bg-slate-950/40 text-slate-500 hover:text-rose-400 hover:bg-slate-950 border-l border-slate-800 transition cursor-pointer";
+                    delBtn.innerHTML = '<i class="fa-solid fa-xmark text-[9px]"></i>';
+                    delBtn.onclick = (e) => {
+                        e.stopPropagation();
+                        removeSuggestion(text);
+                    };
+                    wrapper.appendChild(delBtn);
+                }
+
+                tray.appendChild(wrapper);
+            }
+
+            function saveCurrentAsSuggestion() {
+                const query = document.getElementById('queryInput').value.trim();
+                if (!query) return alert('Type something into the input field first before saving.');
+                if (DEFAULT_SUGGESTIONS.includes(query)) return;
+                
+                const customs = getCustomSuggestions();
+                if (customs.includes(query)) return;
+
+                customs.push(query);
+                localStorage.setItem('custom_car_prompts', JSON.stringify(customs));
+                renderSuggestions();
+            }
+
+            function removeSuggestion(text) {
+                let customs = getCustomSuggestions();
+                customs = customs.filter(item => item !== text);
+                localStorage.setItem('custom_car_prompts', JSON.stringify(customs));
+                renderSuggestions();
+            }
+
+            function setPrompt(text) {
+                document.getElementById('queryInput').value = text;
+                searchCars();
+            }
+
+            async function triggerReset() {
+                if (!confirm('Are you absolutely sure you want to clean up all DB records?')) return;
+                const btn = document.getElementById('resetBtn');
+                btn.disabled = true;
+                btn.innerHTML = '<i class="fa-solid fa-spinner animate-spin"></i> <span>Wiping...</span>';
+                try {
+                    const res = await fetch('/api/reset');
+                    const data = await res.json();
+                    alert(data.message || 'Wiped successfully.');
+                    searchCars(); 
+                } catch(e) {
+                    alert('Administrative reset route execution rejected.');
+                } finally {
+                    btn.disabled = false;
+                    btn.innerHTML = '<i class="fa-solid fa-trash-can"></i> <span>Reset Slate</span>';
+                }
+            }
+
+            async function triggerCrawl() {
+                const btn = document.getElementById('crawlBtn');
+                const originText = btn.innerHTML;
+                btn.disabled = true;
+                btn.innerHTML = '<i class="fa-solid fa-spinner animate-spin"></i> <span>Syncing multi-dealers...</span>';
+                try {
+                    const res = await fetch('/api/crawl');
+                    const data = await res.json();
+                    alert(data.message);
+                    searchCars(); 
+                } catch(e) {
+                    alert('Sync runtime execution failed.');
+                } finally {
+                    btn.disabled = false;
+                    btn.innerHTML = originText;
+                }
+            }
+
+            async function searchCars() {
+                const query = document.getElementById('queryInput').value.trim();
+                const loader = document.getElementById('loader');
+                const grid = document.getElementById('carGrid');
+                const statusBox = document.getElementById('filterStatus');
+                const searchBtn = document.getElementById('searchBtn');
+
+                grid.innerHTML = '';
+                statusBox.classList.add('hidden');
+                loader.classList.remove('hidden');
+                searchBtn.disabled = true;
+
+                try {
+                    const response = await fetch('/api/search?query=' + encodeURIComponent(query));
+                    const data = await response.json();
+                    loader.classList.add('hidden');
+                    searchBtn.disabled = false;
+
+                    if (!data.success) {
+                        grid.innerHTML = '<div class="col-span-full text-center text-rose-400 p-8 border border-rose-950 bg-rose-950/20 rounded-xl"><p>' + data.error + '</p></div>';
+                        return;
+                    }
+
+                    document.getElementById('aiFiltersText').innerText = JSON.stringify(data.ai_filters);
+                    statusBox.classList.remove('hidden');
+
+                    cachedCars = data.results || [];
+                    displayCars();
+
+                } catch(e) {
+                    loader.classList.add('hidden');
+                    searchBtn.disabled = false;
+                    grid.innerHTML = '<div class="col-span-full text-center text-rose-400 p-8"><p>Interface API lookup exception occurred.</p></div>';
+                }
+            }
+
+            function displayCars() {
+                const grid = document.getElementById('carGrid');
+                const hideSold = document.getElementById('hideSoldToggle').checked;
+                const selectedDealer = document.getElementById('dealerSelect').value;
+                
+                grid.innerHTML = '';
+                
+                let filteredCars = cachedCars;
+                if (hideSold) {
+                    filteredCars = filteredCars.filter(car => car.is_sold === 0);
+                }
+                if (selectedDealer !== 'ALL') {
+                    filteredCars = filteredCars.filter(car => car.source === selectedDealer);
+                }
+
+                document.getElementById('matchCount').innerText = filteredCars.length + ' vehicles rendering';
+
+                if (filteredCars.length === 0) {
+                    grid.innerHTML = '<div class="col-span-full text-center text-slate-500 py-16"><i class="fa-solid fa-car-tunnel text-4xl mb-3"></i><p class="text-lg font-medium">No matching cars currently in display views.</p></div>';
+                    return;
+                }
+
+                filteredCars.forEach(car => {
+                    const card = document.createElement('div');
+                    const opacityStyle = car.is_sold ? "opacity-60 grayscale-[20%] hover:grayscale-0" : "";
+                    card.className = "bg-slate-800 rounded-xl overflow-hidden border border-slate-700/60 shadow-lg hover:border-slate-600 transition flex flex-col justify-between " + opacityStyle;
+                    
+                    const sourceName = car.source || 'DCH UCC';
+                    const sourceBadgeStyle = sourceName === 'IM Used Car' 
+                        ? 'bg-purple-950/90 text-purple-300 border-purple-800' 
+                        : 'bg-slate-950 text-sky-400 border-sky-950';
+
+                    let badgesHTML = \`<span class="\${sourceBadgeStyle} border text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-md">\${sourceName}</span>\`;
+                    badgesHTML += \`<span class="bg-slate-900 text-slate-300 border border-slate-800 text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-md">\${car.brand}</span>\`;
+                    
+                    if (car.is_hybrid) {
+                        badgesHTML += \`<span class="bg-emerald-950/80 text-emerald-400 border border-emerald-900 text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-md flex items-center gap-1"><i class="fa-solid fa-leaf"></i> Hybrid</span>\`;
+                    }
+                    if (car.original_price > 0) {
+                        badgesHTML += \`<span class="bg-amber-950/80 text-amber-400 border border-amber-900 text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-md flex items-center gap-1"><i class="fa-solid fa-tags"></i> 特價 SALE</span>\`;
+                    }
+                    if (car.is_sold) {
+                        badgesHTML += \`<span class="bg-rose-950 text-rose-400 border border-rose-900 text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded-md flex items-center gap-1"><i class="fa-solid fa-handshake"></i> 已售 SOLD</span>\`;
+                    }
+
+                    const formattedCc = car.engine_cc > 0 ? car.engine_cc.toLocaleString() + ' c.c.' : 'N/A';
+                    const formattedMileage = car.mileage > 0 ? car.mileage.toLocaleString() + ' km' : 'N/A';
+                    const formattedOwners = car.previous_owners + '手';
+
+                    let priceDisplayHTML = '';
+                    if (car.original_price > 0) {
+                        priceDisplayHTML = \`
+                            <div class="flex flex-col mt-3">
+                                <span class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">特價 Special Price</span>
+                                <div class="flex items-baseline space-x-2">
+                                    <span class="text-2xl font-black text-orange-400 font-mono">HK$ \${car.price_hkd.toLocaleString()}</span>
+                                    <span class="text-xs line-through text-slate-500 font-mono">HK$ \${car.original_price.toLocaleString()}</span>
+                                </div>
+                            </div>
+                        \`;
+                    } else {
+                        priceDisplayHTML = \`
+                            <div class="flex flex-col mt-3">
+                                <span class="text-[10px] font-bold text-slate-500 uppercase tracking-wider">售價 Price</span>
+                                <span class="text-2xl font-black text-amber-400 font-mono">HK$ \${car.price_hkd.toLocaleString()}</span>
+                            </div>
+                        \`;
+                    }
+
+                    card.innerHTML = \`
+                        <div class="p-5">
+                            <div class="flex flex-wrap gap-1.5 items-center justify-between mb-2">
+                                <div class="flex flex-wrap gap-1.5">\${badgesHTML}</div>
+                                <span class="text-[11px] font-bold bg-slate-950 text-amber-500 border border-slate-800 px-2 py-0.5 rounded-md">\${formattedOwners}</span>
+                            </div>
+                            <h3 class="text-lg font-bold text-white truncate mb-1">\${car.model}</h3>
+                            
+                            <div class="grid grid-cols-3 gap-2 my-3 text-center border-y border-slate-700/40 py-2 text-[11px] font-medium text-slate-400">
+                                <div class="border-r border-slate-700/30">
+                                    <div class="text-[10px] uppercase tracking-wide text-slate-500 mb-0.5"><i class="fa-solid fa-calendar text-sky-500/80"></i> Year</div>
+                                    <span class="text-slate-200 font-semibold">\${car.year}</span>
+                                </div>
+                                <div class="border-r border-slate-700/30">
+                                    <div class="text-[10px] uppercase tracking-wide text-slate-500 mb-0.5"><i class="fa-solid fa-gauge-high text-sky-500/80"></i> Mileage</div>
+                                    <span class="text-slate-200 font-semibold truncate block px-0.5">\${formattedMileage}</span>
+                                </div>
+                                <div>
+                                    <div class="text-[10px] uppercase tracking-wide text-slate-500 mb-0.5"><i class="fa-solid fa-bolt text-sky-500/80"></i> Engine</div>
+                                    <span class="text-slate-200 font-semibold">\${formattedCc}</span>
+                                </div>
+                            </div>
+
+                            \${priceDisplayHTML}
+                        </div>
+                        <div class="bg-slate-800/50 px-5 py-3 border-t border-slate-700/40">
+                            <a href="\${car.url}" target="_blank" class="text-xs font-bold text-sky-400 hover:text-sky-300 flex items-center justify-between group">
+                                <span>View Details on \${sourceName}</span>
+                                <i class="fa-solid fa-arrow-up-right-from-square group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition"></i>
+                            </a>
+                        </div>
+                    \`;
+                    grid.appendChild(card);
+                });
+            }
+            
+            window.onload = () => { 
+                renderSuggestions();
+                searchCars(); 
+            };
+        </script>
+    </body>
+    </html>
+    `;
+
+    return new Response(htmlUI, { headers: { "Content-Type": "text/html" } });
+  }
+};
